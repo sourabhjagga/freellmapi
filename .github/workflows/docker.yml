@@ -19,7 +19,6 @@ jobs:
   build:
     name: Build (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
-  workflow_dispatch:
     strategy:
       fail-fast: false
       matrix:
@@ -97,7 +96,6 @@ jobs:
     name: Merge manifest and push
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
-  workflow_dispatch:
     needs: [build]
     steps:
       - name: Download digests
