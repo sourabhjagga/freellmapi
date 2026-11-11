@@ -1,0 +1,137 @@
+name: Deploy & Verify
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-verify
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Skip rollback commits
+        id: skip
+        run: |
+          if echo "${{ github.event.head_commit.message }}" | grep -q '\[skip ci\]'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Rollback commit detected - skipping deploy."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check required secrets
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$COOLIFY_API_TOKEN" ]; then
+            echo "::error::Missing COOLIFY_API_TOKEN"
+            exit 1
+          fi
+          if [ -z "$COOLIFY_URL" ]; then
+            echo "::error::Missing COOLIFY_URL"
+            exit 1
+          fi
+          if [ -z "$COOLIFY_APP_UUID" ]; then
+            echo "::error::Missing COOLIFY_APP_UUID"
+            exit 1
+          fi
+          echo "Required secrets present."
+
+      - name: Trigger Coolify deploy
+        if: steps.skip.outputs.skip != 'true'
+        env:
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+        run: |
+          set -euo pipefail
+          echo "Triggering Coolify deploy for app ${{ secrets.COOLIFY_APP_UUID }}..."
+          curl -s -X POST \
+            -H "Authorization: Bearer ${COOLIFY_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            "${COOLIFY_URL}/api/v1/deploy?uuid=${COOLIFY_APP_UUID}&force=true" \
+            -o /tmp/deploy_response.json
+          cat /tmp/deploy_response.json
+          DEPLOYMENT_UUID=$(jq -r '.deployments[0].deployment_uuid // empty' /tmp/deploy_response.json)
+          if [ -z "$DEPLOYMENT_UUID" ]; then
+            echo "::error::Failed to get deployment UUID"
+            cat /tmp/deploy_response.json
+            exit 1
+          fi
+          echo "deployment_uuid=$DEPLOYMENT_UUID" >> "$GITHUB_OUTPUT"
+          echo "Deployment queued: $DEPLOYMENT_UUID"
+
+      - name: Wait for deployment
+        if: steps.skip.outputs.skip != 'true' && success()
+        env:
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+        run: |
+          set -euo pipefail
+          DEPLOYMENT_UUID="${{ steps.deploy.outputs.deployment_uuid }}"
+          echo "Waiting for deployment $DEPLOYMENT_UUID to complete..."
+          for i in $(seq 1 60); do
+            sleep 10
+            curl -s -H "Authorization: Bearer ${COOLIFY_API_TOKEN}" \
+              "${COOLIFY_URL}/api/v1/deployments/${DEPLOYMENT_UUID}" \
+              -o /tmp/deploy_status.json
+            STATUS=$(jq -r '.status // empty' /tmp/deploy_status.json)
+            echo "Deployment status: $STATUS"
+            if [ "$STATUS" = "finished" ]; then
+              echo "Deployment finished successfully"
+              exit 0
+            elif [ "$STATUS" = "failed" ]; then
+              echo "::error::Deployment failed"
+              cat /tmp/deploy_status.json
+              exit 1
+            fi
+          done
+          echo "::error::Deployment timeout"
+          exit 1
+
+      - name: Verify health
+        if: steps.skip.outputs.skip != 'true' && success()
+        env:
+          COOLIFY_API_TOKEN: ${{ secrets.COOLIFY_API_TOKEN }}
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_APP_UUID: ${{ secrets.COOLIFY_APP_UUID }}
+        run: |
+          set -euo pipefail
+          echo "Verifying application health..."
+          # Get app details to find FQDN
+          curl -s -H "Authorization: Bearer ${COOLIFY_API_TOKEN}" \
+            "${COOLIFY_URL}/api/v1/applications/${COOLIFY_APP_UUID}" \
+            -o /tmp/app_info.json
+          FQDN=$(jq -r '.fqdn // empty' /tmp/app_info.json)
+          if [ -n "$FQDN" ]; then
+            echo "Checking health at https://${FQDN}/api/ping"
+            if curl -s -m 10 -o /dev/null -w "%{http_code}" "https://${FQDN}/api/ping" | grep -q '^2'; then
+              echo "Health check passed: https://${FQDN}/api/ping"
+            else
+              echo "::warning::Health check failed for https://${FQDN}/api/ping"
+            fi
+          else
+            echo "::warning::No FQDN found for app"
+          fi
+
+      - name: Report rollback
+        if: failure() && steps.skip.outputs.skip != 'true'
+        run: |
+          echo "::error::Deployment failed. Check Coolify dashboard for details."
+          exit 1
+
