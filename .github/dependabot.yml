@@ -1,8 +1,12 @@
-# Actions are pinned to commit SHAs in .github/workflows, so nothing floats to a
-# new release on its own. Dependabot is what moves those pins forward.
+# Dependabot version updates are off on purpose.
+#
+# Renovate proposes dependency updates in this repository (see renovate.json).
+# Dependabot alerts stay on and are managed in the repository settings, but if
+# Dependabot also proposed version updates the two bots would open competing
+# pull requests for the same dependency.
+#
+# This empty list is explicit: it does not rely on a dashboard toggle, and it
+# supersedes the dynamic (config-less) version updates GitHub turns on when
+# there is no config file.
 version: 2
-updates:
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
+updates: []
